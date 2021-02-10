@@ -1,0 +1,136 @@
+# ===================================
+
+#   K8s Setup using AWS EC2 Free Tier
+
+# ===================================
+
+# This file contains commands to setup K8s setup
+# in AWS EC2. For this example we use Kops and Kubectl 
+# for kubernetes operations and aws command tools for 
+# setting up EC2 environment. 
+
+# ------------------------------------
+# EC2 Specifications (Varies according to Free Tier Usage)
+
+# System Image : Ubuntu 20.04
+# Service Region : ap-south-1b (Mumbai)
+# Master Node Size : t2.micro (Free Tier)
+# Worker Node Size : t2.micro (Free Tier)
+# Worker Node Count : 2
+
+# ------------------------------------
+
+
+# ---- Getting tools for Setup ----
+# Skip this part if tools were already instaled
+
+# Kubernetes CLI -> kubectl 
+sudo apt-get update && sudo apt-get install -y apt-transport-https gnupg2 curl
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee -a /etc/apt/sources.list.d/kubernetes.list
+sudo apt-get update
+sudo apt-get install -y kubectl
+
+# KOPS setup
+curl -Lo kops https://github.com/kubernetes/kops/releases/download/$(curl -s https://api.github.com/repos/kubernetes/kops/releases/latest | grep tag_name | cut -d '"' -f 4)/kops-linux-amd64
+chmod +x kops
+sudo mv kops /usr/local/bin/kops
+
+# AWS Command line setup
+sudo apt-get install -y awscli
+
+# Before using AWS cli, make sure it is configured using Secret and Access Key form IAM AWS User
+# To configure AWS on command line, use 'aws configure'. If the configuration was done previously
+# You may skip this part
+
+# configure the aws client to use your new IAM user
+aws configure           # Use your new access and secret key here
+aws iam list-users      # you should see a list of all your IAM users here
+
+# Because "aws configure" doesn't export these vars for kops to use, we export them now
+export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id)
+export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key)
+
+aws iam create-group --group-name kops
+
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonRoute53FullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/IAMFullAccess --group-name kops
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/AmazonVPCFullAccess --group-name kops
+
+aws iam create-user --user-name kops
+
+aws iam add-user-to-group --user-name kops --group-name kops
+
+aws iam create-access-key --user-name kops
+
+
+# ---- Setting up variables ----
+
+#  Next, we've to set up environment variables for kops to operate on. AWS interface uses
+#  s3 space for storage, hence s3 url should be either parsed using --state flag or $KOPS_STATE_STORE variable
+
+# To create s3 bucket
+
+aws s3api create-bucket --bucket testenv-k8s-sal --region ap-south-1b
+aws s3api put-bucket-versioning --bucket testenv-k8s-sal  --versioning-configuration Status=Enabled
+
+# if the s3 bucket is already available, ignore the above setup
+# next, export AWS access keys and secret to coresponding variables
+# in order to authenticate AWS cli to services.  
+
+export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id)
+export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key)
+
+# export state name and state store label to variables for kops to work on
+
+export KOPS_STATE_STORE="s3://testenv-k8s-sal" 
+export KOPS_STATE_NAME=$(uname -n)".k8s.local"
+
+# In case of KOPS_STATE_NAME, the value should be domain name ending in k8s.local
+# Or host a domain name AWS Route53 or any other services
+
+# ---- Using KOPS ----
+# Once everything is set, use kops command to create clusters, based on above AWS Specifications
+# the following flags are used on kops
+
+kops create cluster --name $KOPS_STATE_NAME --zones ap-south-1b --master-size=t2.micro --node-size=t2.micro --node-count=2
+
+# Alternatively, you can create clusters using yaml file
+
+kops create -f testenv_k8s.yaml
+
+# Before working on clusters, make sure that public keys for nodes (both master and worker)
+# are generated.
+
+kops create secret --name $KOPS_STATE_NAME sshpublickey admin -i ~/.ssh/id_rsa.pub
+
+# After creating clusters, if there's any specifications or dependencies to be 
+# edited, you can use edit subcommand in kops. This opens up yaml file for editing
+
+kops edit cluster $KOPS_STATE_NAME
+
+# Either editing the configuration or no changes at all, next command is to update 
+# the cluster.
+
+kops update cluster $KOPS_STATE_NAME --yes
+
+# After update, wait for some time for clusters to get ready and adapt changes.
+# then, validate the cluster using kops
+
+kops validate cluster --wait 10m
+
+# To check on clusters, kubectl can be used to list out nodes
+
+kubectl get nodes
+
+# Once the nodes are shown ready, use the public IP of the clusters to ssh
+# to deploy the desired service. Since we're using Ubuntu image, the username
+# will be 'ubuntu'
+
+ssh ubuntu@<ASSIGNED_NODE_IP>
+
+# After the use of clusters, dispose it using delete subcommand in kops
+
+kops delete cluster $KOPS_STATE_NAME --yes
